@@ -2,6 +2,7 @@ from ortools.sat.python import cp_model
 from typing import List
 from .models import ScheduledClass, TimeSlot, Room, Faculty, Course, Section, CourseAssignment
 from .constraints import apply_constraints
+from .objectives import apply_soft_objectives
 
 class Meeting:
     """Internal class to represent an individual period of a CourseAssignment."""
@@ -42,6 +43,9 @@ def solve_timetable(
                 
     # 3. Apply Constraints
     apply_constraints(model, x, meetings, timeslots, rooms, faculty, courses, sections)
+    
+    # 3.5 Apply Soft Objectives
+    apply_soft_objectives(model, x, meetings, timeslots, rooms, faculty, courses, sections)
     
     # 4. Solve
     solver = cp_model.CpSolver()

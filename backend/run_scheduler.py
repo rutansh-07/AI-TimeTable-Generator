@@ -6,7 +6,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from app.scheduler.data_generator import generate_test_data
 from app.scheduler.engine import solve_timetable
-from app.scheduler.validator import validate_timetable
+from app.scheduler.validator import validate_timetable, calculate_metrics
 
 def main():
     print("Generating test data...")
@@ -28,7 +28,7 @@ def main():
         
     print(f"Success! Scheduled {len(schedule)} classes.")
     
-    print("\n--- Validation ---")
+    print("\n--- HARD CONSTRAINT VALIDATION ---")
     is_valid, errors = validate_timetable(
         schedule, timeslots, rooms, faculty, courses, sections, assignments
     )
@@ -41,7 +41,16 @@ def main():
         for e in errors:
             print(f"- {e}")
             
-    print("\n--- Timetable Output ---")
+    print("\n--- OPTIMIZATION METRICS ---")
+    metrics = calculate_metrics(schedule, timeslots, rooms, faculty, courses, sections, assignments)
+    print(f"Total student/section gaps   : {metrics.total_gaps}")
+    print(f"Faculty workload imbalance   : {metrics.faculty_imbalance}")
+    print(f"Room capacity wastage        : {metrics.room_utilization_penalty}")
+    print(f"Faculty preference violations: {metrics.preference_violations}")
+    print(f"Total penalty                : {metrics.total_penalty}")
+    print(f"Quality score                : {metrics.quality_score}")
+    
+    print("\n--- TIMETABLE OUTPUT ---")
     # Pretty print
     ts_map = {t.id: t for t in timeslots}
     room_map = {r.id: r for r in rooms}
@@ -61,7 +70,7 @@ def main():
         f = fac_map[a.faculty_id]
         s = sec_map[a.section_id]
         
-        print(f"[{t}] {r.name[:15]:15} | {c.name[:15]:15} | Section {s.name[:10]:10} | {f.name}")
+        print(f"[{t.day} {t.time}] {r.name[:15]:15} | {c.name[:15]:15} | Section {s.name[:10]:10} | {f.name}")
 
 if __name__ == "__main__":
     main()
