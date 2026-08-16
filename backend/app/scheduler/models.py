@@ -22,6 +22,7 @@ class Faculty:
     id: str
     name: str
     available_timeslots: Set[int] = field(default_factory=set)
+    preferred_timeslots: Set[int] = field(default_factory=set)
 
 @dataclass
 class Course:
@@ -54,3 +55,14 @@ class ScheduledClass:
     period_idx: int
     timeslot_id: int
     room_id: str
+
+@dataclass
+class ScheduleMetrics:
+    """Output model representing the quality metrics of a schedule."""
+    total_gaps: int
+    faculty_imbalance: int
+    room_utilization_penalty: int
+    preference_violations: int
+    total_penalty: int
+    quality_score: int
+
