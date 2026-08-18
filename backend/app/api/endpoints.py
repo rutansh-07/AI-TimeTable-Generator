@@ -1,7 +1,9 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Query
+from typing import List
 from app.schemas.scheduler import GenerateRequest, ValidateRequest, TimetableResponse, ScheduledClassSchema, ScheduleMetricsSchema
 from app.scheduler.engine import solve_timetable
 from app.scheduler.validator import validate_timetable, calculate_metrics
+from app.db.connection import get_scheduler_input, save_schedule, get_active_schedule
 
 router = APIRouter()
 
@@ -93,3 +95,84 @@ def reoptimize_timetable(request: GenerateRequest):
     Re-runs the existing optimization engine and returns the updated timetable.
     """
     return generate_timetable(request)
+
+@router.post("/generate-db", response_model=TimetableResponse)
+def generate_timetable_from_db(schedule_name: str = Query("Generated Schedule", description="Name of the generated schedule")):
+    """
+    Loads scheduling data from the PostgreSQL database, runs the OR-Tools solver,
+    saves the generated timetable back to the database as the active schedule,
+    and returns the result.
+    """
+    try:
+        timeslots, rooms, faculty, courses, sections, assignments = get_scheduler_input()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database retrieval error: {str(e)}"
+        )
+
+    try:
+        schedule = solve_timetable(
+            timeslots=timeslots,
+            rooms=rooms,
+            faculty=faculty,
+            courses=courses,
+            sections=sections,
+            assignments=assignments
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Solver error: {str(e)}"
+        )
+        
+    if not schedule:
+        return TimetableResponse(
+            status="INFEASIBLE",
+            message="No feasible schedule could be found with the given constraints.",
+            schedule=[],
+            is_valid=False,
+            errors=["Infeasible scheduling problem."],
+            metrics=None
+        )
+        
+    # Validate and calculate metrics
+    is_valid, errors = validate_timetable(schedule, timeslots, rooms, faculty, courses, sections, assignments)
+    internal_metrics = calculate_metrics(schedule, timeslots, rooms, faculty, courses, sections, assignments)
+    
+    # Save the schedule to the database
+    try:
+        save_schedule(schedule_name, schedule)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database save error: {str(e)}"
+        )
+        
+    # Convert back to API schemas
+    api_schedule = [ScheduledClassSchema.from_internal(sc) for sc in schedule]
+    api_metrics = ScheduleMetricsSchema.from_internal(internal_metrics)
+    
+    return TimetableResponse(
+        status="SUCCESS",
+        message="Optimal schedule generated and saved to database successfully.",
+        schedule=api_schedule,
+        is_valid=is_valid,
+        errors=errors,
+        metrics=api_metrics
+    )
+
+@router.get("/active", response_model=List[ScheduledClassSchema])
+def get_active_timetable():
+    """
+    Retrieves the currently active timetable from the database.
+    """
+    try:
+        schedule = get_active_schedule()
+        return [ScheduledClassSchema.from_internal(sc) for sc in schedule]
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database retrieval error: {str(e)}"
+        )
+
