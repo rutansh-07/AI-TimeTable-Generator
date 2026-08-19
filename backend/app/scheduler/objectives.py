@@ -3,9 +3,9 @@ from typing import List, Dict, Any
 from .models import TimeSlot, Room, Faculty, Course, Section, CourseAssignment
 
 WEIGHTS = {
-    "student_gap": 10,
-    "faculty_imbalance": 8,
-    "non_preferred_slot": 5,
+    "student_gap": 100,
+    "faculty_imbalance": 40,
+    "non_preferred_slot": 20,
     "room_wastage": 1
 }
 
