@@ -9,12 +9,15 @@ def validate_timetable(
     faculty: List[Faculty],
     courses: List[Course],
     sections: List[Section],
-    assignments: List[CourseAssignment]
+    assignments: List[CourseAssignment],
+    assignment_student_counts: dict = None
 ) -> Tuple[bool, List[str]]:
     """
     Validates a generated timetable against all hard constraints.
     Returns (is_valid, list_of_errors).
     """
+    if assignment_student_counts is None:
+        assignment_student_counts = {}
     if not schedule:
         return False, ["Schedule is empty."]
         
@@ -62,9 +65,10 @@ def validate_timetable(
             section_schedule[st_key] = []
         section_schedule[st_key].append(a.id)
         
-        # 4. Room capacity
-        if r.capacity < s.student_count:
-            errors.append(f"Capacity violated: Section {s.name} (size {s.student_count}) in Room {r.name} (cap {r.capacity}) at {t.time}.")
+    # 4. Room capacity
+        effective_capacity = assignment_student_counts.get(a.id, s.student_count)
+        if r.capacity < effective_capacity:
+            errors.append(f"Capacity violated: Assignment {a.id} (size {effective_capacity}) in Room {r.name} (cap {r.capacity}) at {t.time}.")
             
         # 5. Faculty availability
         if t.id not in f.available_timeslots:
@@ -85,15 +89,112 @@ def validate_timetable(
             
     for (tid, sid), assign_ids in section_schedule.items():
         if len(assign_ids) > 1:
-            errors.append(f"Section clash for {sec_map[sid].name} at {ts_map[tid].time}")
+            # Check if it's a valid batch-parallelism or same-elective-group coexistence
+            # Rule:
+            # 1. Multiple assignments in the EXACT same elective_group_id may coexist (parallel tracks).
+            # 2. Multiple assignments in DIFFERENT lab batches (and no regular whole / elective) may coexist.
+            # 3. Any mix of regular whole with batch/elective, or distinct elective groups, is a clash.
             
-    # 7. Required weekly course periods
+            # Check if all assignments belong to the same elective group
+            elective_groups = {assign_map[aid].elective_group_id for aid in assign_ids if assign_map[aid].elective_group_id}
+            has_regular_whole = any(
+                not assign_map[aid].lab_batch_id and not assign_map[aid].elective_group_id
+                for aid in assign_ids
+            )
+            has_batches = any(assign_map[aid].lab_batch_id for aid in assign_ids)
+            
+            if elective_groups and len(elective_groups) == 1 and not has_regular_whole and not has_batches:
+                # All assignments belong to the same elective group — valid parallel elective options
+                pass
+            else:
+                batches = set()
+                clash = False
+                for aid in assign_ids:
+                    a_obj = assign_map[aid]
+                    b = a_obj.lab_batch_id
+                    g = a_obj.elective_group_id
+                    
+                    if not b and not g:
+                        # Regular whole section class clashes with any other class at this time
+                        errors.append(f"Section clash for {sec_map[sid].name} at {ts_map[tid].time} (lecture '{course_map[a_obj.course_id].name}' overlaps with other classes).")
+                        clash = True
+                        break
+                    elif b:
+                        if b in batches or elective_groups or has_regular_whole:
+                            errors.append(f"Batch clash for {sec_map[sid].name} Batch {b} at {ts_map[tid].time}.")
+                            clash = True
+                            break
+                        batches.add(b)
+                    elif g:
+                        if has_regular_whole or has_batches or len(elective_groups) > 1:
+                            errors.append(f"Elective slot clash for {sec_map[sid].name} at {ts_map[tid].time} with other classes.")
+                            clash = True
+                            break
+                
+    # 7. Required weekly course periods & Lab continuous block
+    def time_to_minutes(time_str: str) -> int:
+        h, m = map(int, time_str.split(':'))
+        return h * 60 + m
+        
+    days_map = {}
+    for t in timeslots:
+        days_map.setdefault(t.day, []).append(t)
+    has_60min = any(
+        time_to_minutes(slots[i+1].time) - time_to_minutes(slots[i].time) == 60
+        for slots in days_map.values()
+        for i in range(len(slots) - 1)
+    )
+    valid_step = 60 if has_60min else 120
+
     for a in assignments:
         if meetings_per_assignment[a.id] != a.weekly_periods:
             errors.append(f"Periods violated: Assignment {a.id} required {a.weekly_periods} but got {meetings_per_assignment[a.id]}.")
             
+        c = course_map[a.course_id]
+        if c.requires_lab and a.weekly_periods == 2:
+            a_classes = sorted([sc for sc in schedule if sc.assignment_id == a.id], key=lambda sc: sc.period_idx)
+            if len(a_classes) == 2:
+                sc1, sc2 = a_classes[0], a_classes[1]
+                t1, t2 = ts_map[sc1.timeslot_id], ts_map[sc2.timeslot_id]
+                
+                if t1.day != t2.day:
+                    errors.append(f"Lab block broken: Assignment {a.id} spans multiple days ({t1.day} and {t2.day}).")
+                if sc1.room_id != sc2.room_id:
+                    errors.append(f"Lab block broken: Assignment {a.id} uses different rooms ({sc1.room_id} and {sc2.room_id}).")
+                    
+                diff = time_to_minutes(t2.time) - time_to_minutes(t1.time)
+                if diff != valid_step:
+                    errors.append(f"Lab block broken: Assignment {a.id} slots are not contiguous ({t1.time} to {t2.time}).")
+
+    # 8. Step 3B: Elective Group Synchronization Independent Validation
+    elective_assignment_map: dict = {}
+    for a in assignments:
+        if a.elective_group_id:
+            elective_assignment_map.setdefault(a.elective_group_id, []).append(a)
+
+    for gid, group_assigns in elective_assignment_map.items():
+        if len(group_assigns) >= 2:
+            min_periods = min(a.weekly_periods for a in group_assigns)
+            for period_idx in range(min_periods):
+                scheduled_slots = {}
+                for a in group_assigns:
+                    sc = next((sc for sc in schedule if sc.assignment_id == a.id and sc.period_idx == period_idx), None)
+                    if sc:
+                        scheduled_slots[a.id] = sc.timeslot_id
+                
+                distinct_slots = set(scheduled_slots.values())
+                if len(distinct_slots) > 1:
+                    slot_details = ", ".join(
+                        f"Assign {aid}: Slot {tid} ({ts_map[tid].day} {ts_map[tid].time})"
+                        for aid, tid in scheduled_slots.items()
+                    )
+                    errors.append(
+                        f"Elective synchronization violated for group '{gid}' at period {period_idx}: {slot_details}"
+                    )
+            
     is_valid = len(errors) == 0
     return is_valid, errors
+
 
 def calculate_metrics(
     schedule: List[ScheduledClass],
@@ -102,8 +203,11 @@ def calculate_metrics(
     faculty: List[Faculty],
     courses: List[Course],
     sections: List[Section],
-    assignments: List[CourseAssignment]
+    assignments: List[CourseAssignment],
+    assignment_student_counts: dict = None
 ) -> ScheduleMetrics:
+    if assignment_student_counts is None:
+        assignment_student_counts = {}
     # Lookups
     ts_map = {t.id: t for t in timeslots}
     room_map = {r.id: r for r in rooms}
@@ -159,7 +263,8 @@ def calculate_metrics(
         f = fac_map[a.faculty_id]
         
         # Room utilization
-        wastage = r.capacity - s.student_count
+        effective_capacity = assignment_student_counts.get(a.id, s.student_count)
+        wastage = r.capacity - effective_capacity
         if wastage > 0:
             room_utilization_penalty += wastage
             

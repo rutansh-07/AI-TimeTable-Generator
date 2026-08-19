@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.endpoints import router as timetable_router
+from app.api.hierarchy import router as hierarchy_router
 
 app = FastAPI(
     title="AI Timetable Generator API",
@@ -21,4 +22,5 @@ def health_check():
     return {"status": "ok", "message": "FastAPI scheduling server is running."}
 
 app.include_router(timetable_router, prefix="/api/timetable", tags=["Timetable"])
+app.include_router(hierarchy_router, prefix="/api/hierarchy", tags=["Hierarchy"])
 
