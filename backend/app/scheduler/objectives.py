@@ -4,6 +4,7 @@ from .models import TimeSlot, Room, Faculty, Course, Section, CourseAssignment
 
 WEIGHTS = {
     "student_gap": 100,
+    "daily_span": 10,
     "faculty_imbalance": 40,
     "non_preferred_slot": 20,
     "room_wastage": 1
@@ -19,15 +20,21 @@ def apply_soft_objectives(
     courses: List[Course],
     sections: List[Section]
 ):
-    """
-    Applies the soft objectives by calculating a total penalty and setting the model to minimize it.
-    """
     penalties = []
     
     # Helper structures
-    days = list(set(t.day for t in timeslots))
-    timeslots_by_day = {day: [t for t in timeslots if t.day == day] for day in days}
-    
+    days = sorted(list(set(t.day for t in timeslots)))
+    def time_to_minutes(t_str: str) -> int:
+        h, m = map(int, t_str.split(':'))
+        return h * 60 + m
+
+    timeslots_by_day = {}
+    for day in days:
+        timeslots_by_day[day] = sorted(
+            [t for t in timeslots if t.day == day],
+            key=lambda t: time_to_minutes(t.time)
+        )
+        
     section_map = {s.id: s for s in sections}
     faculty_map = {f.id: f for f in faculty}
     
@@ -35,6 +42,8 @@ def apply_soft_objectives(
     section_has_class = {}
     for s in sections:
         s_meetings = [m for m in meetings if m.assignment.section_id == s.id]
+        if not s_meetings:
+            continue
         for day in days:
             day_slots = timeslots_by_day[day]
             for i, t in enumerate(day_slots):
@@ -43,6 +52,9 @@ def apply_soft_objectives(
                 section_has_class[(s.id, i, day)] = b
                 
     for s in sections:
+        s_meetings = [m for m in meetings if m.assignment.section_id == s.id]
+        if not s_meetings:
+            continue
         for day in days:
             day_slots = timeslots_by_day[day]
             num_slots = len(day_slots)
@@ -65,7 +77,28 @@ def apply_soft_objectives(
                 
                 penalties.append(is_gap * WEIGHTS["student_gap"])
 
-    # --- Objective 2: Balance faculty workload ---
+    # --- Objective 2: Minimize Daily Span ---
+    for s in sections:
+        s_meetings = [m for m in meetings if m.assignment.section_id == s.id]
+        if not s_meetings:
+            continue
+        for day in days:
+            day_slots = timeslots_by_day[day]
+            num_slots = len(day_slots)
+            
+            first = model.NewIntVar(0, num_slots - 1, f"first_{s.id}_{day}")
+            last = model.NewIntVar(0, num_slots - 1, f"last_{s.id}_{day}")
+            
+            for i in range(num_slots):
+                b = section_has_class[(s.id, i, day)]
+                model.Add(last >= i).OnlyEnforceIf(b)
+                model.Add(first <= i).OnlyEnforceIf(b)
+                
+            span = model.NewIntVar(0, num_slots - 1, f"span_{s.id}_{day}")
+            model.Add(span == last - first)
+            penalties.append(span * WEIGHTS["daily_span"])
+
+    # --- Objective 3: Balance faculty workload ---
     for f in faculty:
         f_meetings = [m for m in meetings if m.assignment.faculty_id == f.id]
         if not f_meetings:
@@ -88,25 +121,18 @@ def apply_soft_objectives(
         model.Add(diff == max_classes - min_classes)
         penalties.append(diff * WEIGHTS["faculty_imbalance"])
         
-    # --- Objective 3: Improve room utilization ---
-    for m in meetings:
-        s = section_map[m.assignment.section_id]
-        for t in timeslots:
-            for r in rooms:
-                wastage = r.capacity - s.student_count
-                if wastage > 0:
-                    penalties.append(x[(m.id, t.id, r.id)] * wastage * WEIGHTS["room_wastage"])
-                    
-    # --- Objective 4: Prefer faculty timeslots ---
+    # --- Objective 4: Room utilization & preferred slots ---
     for m in meetings:
         f = faculty_map[m.assignment.faculty_id]
         for t in timeslots:
-            if t.id not in f.preferred_timeslots:
-                for r in rooms:
+            for r in rooms:
+                wastage = r.capacity - m.effective_student_count
+                if wastage > 0:
+                    penalties.append(x[(m.id, t.id, r.id)] * wastage * WEIGHTS["room_wastage"])
+                
+                if t.id not in f.preferred_timeslots:
                     penalties.append(x[(m.id, t.id, r.id)] * WEIGHTS["non_preferred_slot"])
                     
-    # Sum up penalties and minimize
     if penalties:
-        total_penalty = model.NewIntVar(0, 1000000, "total_penalty")
-        model.Add(total_penalty == sum(penalties))
-        model.Minimize(total_penalty)
+        # Avoid Int overflow bug by letting solver bound it implicitly
+        model.Minimize(sum(penalties))

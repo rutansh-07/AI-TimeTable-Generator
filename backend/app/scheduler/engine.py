@@ -61,8 +61,8 @@ def solve_timetable(
     
     # 4. Solve
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 60.0
-    # solver.parameters.log_search_progress = True # Optional logging
+    solver.parameters.max_time_in_seconds = 120.0
+    solver.parameters.log_search_progress = True
     status = solver.Solve(model)
     
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
