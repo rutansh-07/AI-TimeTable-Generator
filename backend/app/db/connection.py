@@ -244,9 +244,11 @@ def get_active_schedule() -> List[ScheduledClass]:
     """
     with get_db_cursor() as cursor:
         query = """
-            SELECT sc.assignment_id, sc.lab_batch_id, sc.period_idx, sc.timeslot_id, sc.room_id
+            SELECT sc.assignment_id, sc.lab_batch_id, sc.period_idx, sc.timeslot_id, sc.room_id,
+                   lb.batch_code
             FROM scheduled_classes sc
             JOIN schedules s ON sc.schedule_id = s.id
+            LEFT JOIN lab_batches lb ON sc.lab_batch_id = lb.id
             WHERE s.is_active = TRUE;
         """
         cursor.execute(query)
@@ -254,7 +256,7 @@ def get_active_schedule() -> List[ScheduledClass]:
 
         return [
             ScheduledClass(
-                assignment_id=row['assignment_id'],
+                assignment_id=f"{row['assignment_id']}_{row['batch_code']}" if row['batch_code'] else row['assignment_id'],
                 period_idx=row['period_idx'],
                 timeslot_id=row['timeslot_id'],
                 room_id=row['room_id'],
